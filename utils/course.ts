@@ -1,13 +1,14 @@
 import { db } from "@/db";
 import {
     chapters as chaptersTable,
-    courseEnrollments as courses,
-    quizzesTable,
+    courseEnrollments as courseEnrollmentsTable,
+    courses as coursesTable,
+    quizzes as quizzesTable,
     subtopics as subtopicsTable,
 } from "@/db/schema";
 import { handleGamificationAction } from "./gamification";
 import { generateCourseBannerImage, generateCourseContent } from "./gemini";
-import { uploadToImageKit } from "./imageKit";
+import { uploadToImageKit } from "./imagekit";
 
 export async function forgeCourse(
   topic: string,
@@ -50,7 +51,7 @@ export async function forgeCourse(
     }
 
     const [newCourse] = await db
-      .insert(courses)
+      .insert(coursesTable)
       .values({
         title: courseData.title,
         description: courseData.description,
@@ -62,7 +63,7 @@ export async function forgeCourse(
       })
       .returning();
 
-    await db.insert(courseEnrollments).values({
+    await db.insert(courseEnrollmentsTable).values({
       userId: userId,
       courseId: newCourse.id,
       currentChapter: "Chapter 1",
@@ -77,8 +78,7 @@ export async function forgeCourse(
         .values({
           courseId: newCourse.id,
           title: chapter.title,
-          content: chapter.content,
-          order: i + 1,
+          orderNumber: i + 1,
         })
         .returning();
 
@@ -90,7 +90,7 @@ export async function forgeCourse(
             chapterId: newChapter.id,
             title: subtopic.title,
             content: subtopic.content,
-            order: j + 1,
+            orderNumber: j + 1,
           })
           .returning();
 
