@@ -1,85 +1,86 @@
-import { useUser } from "@clerk/expo";
 import { useEffect } from "react";
-import { db } from "@/db";
-import { users } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { useAuth } from "@/context/AuthContext";
+import { auth, db } from "@/utils/firebase/config";
+import { doc, setDoc, getDoc, updateDoc } from "firebase/firestore";
 
 /**
- * Hook to synchronize the authenticated Clerk user with the NeonDB database.
+ * Hook to synchronize the authenticated user with Firebase Firestore.
  * This runs on app load or whenever the user's authentication state changes.
  */
 export const useSyncUser = () => {
-  const { user, isLoaded, isSignedIn } = useUser();
+  const { user, isSignedIn, refreshUser } = useAuth();
 
   useEffect(() => {
-    if (isLoaded && isSignedIn && user) {
+    if (isSignedIn && user) {
       syncUser();
+    } else if (!isSignedIn) {
+      console.log("DATABASE_SYNC: User not signed in, skipping sync");
     }
-  }, [isLoaded, isSignedIn, user]);
+  }, [isSignedIn, user]);
 
   const syncUser = async () => {
     if (!user) return;
 
     try {
-      const email = user.primaryEmailAddress?.emailAddress;
-      const name = user.fullName || user.firstName || "Hero";
-      const imageUrl = user.imageUrl;
-      const clerkId = user.id;
+      const email = user.email;
+      const name = user.name || "Hero";
+      const userId = user.id;
 
-      if (!email || !clerkId) {
-        console.warn("User sync skipped: Missing email or Clerk ID");
-        return;
-      }
+      // Check if user exists in Firestore by id
+      const userDocRef = doc(db, "users", userId);
+      const userDoc = await getDoc(userDocRef);
 
-      // 1. Check if user exists in our DB by clerkId
-      const resultByClerkId = await db.select().from(users).where(eq(users.clerkId, clerkId)).limit(1);
-      const userByClerkId = resultByClerkId[0];
+      if (userDoc.exists()) {
+        // User exists, check if updates needed
+        const dbUser = userDoc.data();
+        const updates: any = {};
+        let needsUpdate = false;
 
-      if (userByClerkId) {
-        // User already linked by Clerk ID, check if updates are needed
-        if (
-          userByClerkId.email !== email ||
-          userByClerkId.name !== name ||
-          userByClerkId.imageUrl !== imageUrl
-        ) {
-          await db
-            .update(users)
-            .set({ email, name, imageUrl })
-            .where(eq(users.clerkId, clerkId));
-          console.log("DATABASE_SYNC: User updated (clerkID match):", email);
+        if (dbUser.email !== email) {
+          updates.email = email;
+          needsUpdate = true;
+        }
+        if (dbUser.name !== name) {
+          updates.name = name;
+          needsUpdate = true;
+        }
+
+        if (needsUpdate) {
+          await updateDoc(userDocRef, updates);
+          console.log("DATABASE_SYNC: User updated:", email);
         } else {
-          console.log("DATABASE_SYNC: User already in sync (clerkID match).");
+          console.log("DATABASE_SYNC: User already in sync.");
         }
         return;
       }
 
-      // 2. Check if user exists by email (handle case where user was created manually or re-created in Clerk)
-      const resultByEmail = await db.select().from(users).where(eq(users.email, email)).limit(1);
-      const userByEmail = resultByEmail[0];
-
-      if (userByEmail) {
-        // User exists by email, link the clerkId
-        await db
-          .update(users)
-          .set({ clerkId, name, imageUrl })
-          .where(eq(users.email, email));
-        console.log("DATABASE_SYNC: User linked and updated by email match:", email);
-        return;
-      }
-
-      // 3. Neither exists, create new record
-      await db.insert(users).values({
-        clerkId,
+      // User doesn't exist in Firestore, create new record
+      // (This shouldn't happen normally as signUp creates it, but handle edge case)
+      console.warn("DATABASE_SYNC: User not found in Firestore, creating new record");
+      await setDoc(userDocRef, {
+        id: userId,
         email,
         name,
-        imageUrl,
+        imageUrl: user.imageUrl || null,
+        xp: 0,
+        coins: 0,
+        level: 1,
+        rank: "Novice",
+        nextLevelXp: 50,
+        nextLevelCoins: 100,
+        dailyStreak: 0,
+        lastCheckIn: null,
+        subscriptionStatus: "free",
+        bio: "A mysterious wanderer in the cyber realm. Ready to learn and conquer.",
+        guild: "Freelancer",
+        createdAt: new Date(),
+        lastBountyUpdate: null,
+        passwordHash: user.passwordHash || null,
       });
-      console.log("DATABASE_SYNC: New user created:", email);
+      console.log("DATABASE_SYNC: New user created in Firestore:", email);
     } catch (error: any) {
-      console.error("DATABASE_SYNC_ERROR: Failed to sync user to database:", error);
-      if (error?.message) {
-        console.error("ERROR_MESSAGE:", error.message);
-      }
+      console.error("DATABASE_SYNC_ERROR:", error);
     }
   };
+};
 };

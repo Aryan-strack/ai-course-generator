@@ -1,81 +1,66 @@
-import { useUser } from "@clerk/expo";
+import { useAuth } from "@/context/AuthContext";
 import { useEffect, useState, useCallback } from "react";
-import { db } from "@/db";
-import { users, courses, courseEnrollments } from "@/db/schema";
-import { eq, desc, and } from "drizzle-orm";
+import { db } from "@/utils/firebase/config";
+import { collection, query, where, getDocs, orderBy, desc, and, getDoc, doc } from "firebase/firestore";
 
 export interface ActiveCourse {
   title: string;
   chapter: string | null;
   progress: number;
   rewardXp: number;
-  courseId: number;
-  enrollmentId: number;
+  courseId: string;
+  enrollmentId: string;
 }
 
 /**
  * Hook to fetch the most recently accessed active course for the current user.
  */
 export const useActiveCourse = () => {
-  const { user, isLoaded, isSignedIn } = useUser();
+  const { user, isSignedIn, isLoading: authLoading } = useAuth();
   const [activeCourse, setActiveCourse] = useState<ActiveCourse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
   const fetchActiveCourse = useCallback(async () => {
-    if (!isLoaded || !isSignedIn || !user) {
+    if (!isSignedIn || !user) {
       setIsLoading(false);
+      setActiveCourse(null);
       return;
     }
 
     try {
       setIsLoading(true);
-      
-      // 1. Get User ID from DB
-      const userResult = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.clerkId, user.id))
-        .limit(1);
 
-      if (userResult.length === 0) {
-        setIsLoading(false);
-        return;
-      }
+      // Fetch enrollments for this user that aren't completed
+      const enrollmentsRef = collection(db, "courseEnrollments");
+      const q = query(
+        enrollmentsRef,
+        where("userId", "==", user.id),
+        where("isCompleted", "==", false),
+        orderBy("lastAccessedAt", "desc")
+      );
 
-      const userId = userResult[0].id;
+      const snapshot = await getDocs(q);
 
-      // 2. Fetch the most recent enrollment that isn't completed
-      const enrollmentResult = await db
-        .select({
-          enrollmentId: courseEnrollments.id,
-          progress: courseEnrollments.progress,
-          currentChapter: courseEnrollments.currentChapter,
-          courseId: courses.id,
-          title: courses.title,
-          rewardXp: courses.rewardXp,
-        })
-        .from(courseEnrollments)
-        .innerJoin(courses, eq(courseEnrollments.courseId, courses.id))
-        .where(
-          and(
-            eq(courseEnrollments.userId, userId),
-            eq(courseEnrollments.isCompleted, 0)
-          )
-        )
-        .orderBy(desc(courseEnrollments.lastAccessedAt))
-        .limit(1);
+      if (!snapshot.empty) {
+        const enrollmentDoc = snapshot.docs[0];
+        const data = enrollmentDoc.data();
 
-      if (enrollmentResult.length > 0) {
-        const data = enrollmentResult[0];
-        setActiveCourse({
-          title: data.title,
-          chapter: data.currentChapter,
-          progress: data.progress,
-          rewardXp: data.rewardXp,
-          courseId: data.courseId,
-          enrollmentId: data.enrollmentId,
-        });
+        // Fetch course details
+        const courseDoc = await getDoc(doc(db, "courses", data.courseId));
+        if (courseDoc.exists()) {
+          const courseData = courseDoc.data();
+          setActiveCourse({
+            title: courseData.title,
+            chapter: data.currentChapter || null,
+            progress: data.progress || 0,
+            rewardXp: courseData.rewardXp || 0,
+            courseId: data.courseId,
+            enrollmentId: enrollmentDoc.id,
+          });
+        } else {
+          setActiveCourse(null);
+        }
       } else {
         setActiveCourse(null);
       }
@@ -86,7 +71,7 @@ export const useActiveCourse = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [isLoaded, isSignedIn, user]);
+  }, [isSignedIn, user]);
 
   useEffect(() => {
     fetchActiveCourse();
@@ -94,7 +79,7 @@ export const useActiveCourse = () => {
 
   return {
     activeCourse,
-    isLoading,
+    isLoading: isLoading || authLoading,
     error,
     refetch: fetchActiveCourse,
   };

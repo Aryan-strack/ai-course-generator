@@ -1,17 +1,27 @@
-import { neon } from "@neondatabase/serverless";
-import "dotenv/config";
-import { drizzle } from "drizzle-orm/neon-http";
-import * as schema from "../db/schema";
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  getDocs, 
+  query, 
+  where 
+} from 'firebase/firestore';
+import * as dotenv from 'dotenv';
+dotenv.config();
 
-const databaseUrl = process.env.EXPO_PUBLIC_DATABASE_URL;
+const firebaseConfig = {
+  apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
+};
 
-if (!databaseUrl) {
-  console.error("EXPO_PUBLIC_DATABASE_URL is not set in .env");
-  process.exit(1);
-}
-
-const sql = neon(databaseUrl);
-const db = drizzle({ client: sql, schema });
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
 
 const trophiesData = [
   {
@@ -76,23 +86,25 @@ async function seed() {
   console.log("SEEDING_TROPHIES: Starting...");
 
   try {
+    const trophiesRef = collection(db, "trophies");
+
     for (const trophy of trophiesData) {
-      await db
-        .insert(schema.trophies)
-        .values(trophy)
-        .onConflictDoUpdate({
-          target: schema.trophies.name,
-          set: {
-            description: trophy.description,
-            icon: trophy.icon,
-            conditionType: trophy.conditionType,
-            conditionValue: trophy.conditionValue,
-            category: trophy.category,
-          },
-        });
+      // Check if trophy exists
+      const q = query(trophiesRef, where("name", "==", trophy.name));
+      const snapshot = await getDocs(q);
+
+      if (snapshot.empty) {
+        // Create new trophy
+        await setDoc(doc(trophiesRef), trophy);
+        console.log(`SEEDING_TROPHIES: Trophy "${trophy.name}" created`);
+      } else {
+        // Update existing trophy
+        await setDoc(doc(db, "trophies", snapshot.docs[0].id), trophy);
+        console.log(`SEEDING_TROPHIES: Trophy "${trophy.name}" updated`);
+      }
     }
 
-    console.log("SEEDING_TROPHIES: Successfully seeded 7 trophies!");
+    console.log("SEEDING_TROPHIES: Successfully seeded/updated 7 trophies!");
   } catch (error) {
     console.error("SEEDING_ERROR:", error);
   }

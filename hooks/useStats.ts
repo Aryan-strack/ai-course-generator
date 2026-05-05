@@ -1,12 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
-import { db } from "@/db";
-import { users, trophies, userTrophies, courseEnrollments } from "@/db/schema";
-import { eq, desc, sql } from "drizzle-orm";
-import { useUser } from "@clerk/expo";
+import { db } from "@/utils/firebase/config";
+import { collection, query, orderBy, getDocs, limit, where, updateDoc, doc, getCountFromServer } from "firebase/firestore";
+import { useAuth } from "@/context/AuthContext";
 import { useUserData } from "./useUserData";
 
 export interface RankingUser {
-  id: number;
+  id: string;
   name: string;
   xp: number;
   level: number;
@@ -15,7 +14,7 @@ export interface RankingUser {
 }
 
 export interface TrophyWithStatus {
-  id: number;
+  id: string;
   name: string;
   description: string;
   icon: string;
@@ -30,7 +29,7 @@ export interface LearningAnalytics {
 }
 
 export const useStats = () => {
-  const { user } = useUser();
+  const { user, isSignedIn, isLoading: authLoading } = useAuth();
   const { userData, refetch: refetchUser } = useUserData();
   const [rankings, setRankings] = useState<RankingUser[]>([]);
   const [allTrophies, setAllTrophies] = useState<TrophyWithStatus[]>([]);
@@ -40,74 +39,87 @@ export const useStats = () => {
   const [isLoading, setIsLoading] = useState(true);
 
   const fetchStats = useCallback(async () => {
-    if (!user || !userData) {
-        setIsLoading(false);
-        return;
-    };
+    if (!isSignedIn || !userData) {
+      setIsLoading(false);
+      return;
+    }
 
     try {
       setIsLoading(true);
 
       // 1. Fetch Rankings (Top 10)
-      const topUsers = await db
-        .select()
-        .from(users)
-        .orderBy(desc(users.xp))
-        .limit(10);
+      const usersRef = collection(db, "users");
+      const topUsersQuery = query(usersRef, orderBy("xp", "desc"), limit(10));
+      const topUsersSnapshot = await getDocs(topUsersQuery);
 
-      const formattedRankings = topUsers.map((u, index) => ({
-        id: u.id,
-        name: u.name,
-        xp: u.xp,
-        level: u.level,
-        imageUrl: u.imageUrl,
-        rank: index + 1,
-      }));
+      const formattedRankings = topUsersSnapshot.docs.map((doc, index) => {
+        const u = doc.data();
+        return {
+          id: doc.id,
+          name: u.name,
+          xp: u.xp || 0,
+          level: u.level || 1,
+          imageUrl: u.imageUrl || null,
+          rank: index + 1,
+        };
+      });
 
       setRankings(formattedRankings);
 
       // 2. Fetch All Trophies with Earned Status
-      const allTrophiesList = await db.select().from(trophies);
-      const earnedTrophies = await db
-        .select()
-        .from(userTrophies)
-        .where(eq(userTrophies.userId, userData.id));
+      const trophiesRef = collection(db, "trophies");
+      const trophiesSnapshot = await getDocs(trophiesRef);
 
-      const trophiesWithStatus = allTrophiesList.map((t) => {
-        const earned = earnedTrophies.find((et) => et.trophyId === t.id);
+      const userTrophiesRef = collection(db, "userTrophies");
+      const userTrophiesQuery = query(userTrophiesRef, where("userId", "==", userData.id));
+      const userTrophiesSnapshot = await getDocs(userTrophiesQuery);
+
+      const earnedTrophies = userTrophiesSnapshot.docs.map(doc => ({ 
+        trophyId: doc.data().trophyId, 
+        earnedAt: doc.data().earnedAt 
+      }));
+
+      const trophiesWithStatus = trophiesSnapshot.docs.map(doc => {
+        const t = doc.data();
+        const earned = earnedTrophies.find(et => et.trophyId === doc.id);
         return {
-          id: t.id,
+          id: doc.id,
           name: t.name,
           description: t.description,
           icon: t.icon,
           isEarned: !!earned,
-          earnedAt: earned ? new Date(earned.earnedAt) : null,
+          earnedAt: earned?.earnedAt ? new Date(earned.earnedAt.seconds * 1000) : null,
         };
       });
 
       setAllTrophies(trophiesWithStatus);
 
       // 3. Find current user rank
-      const [rankResult] = await db
-        .select({
-          rank: sql<number>`count(*) + 1`,
-        })
-        .from(users)
-        .where(sql`${users.xp} > ${userData.xp}`);
-    
-      setCurrentUserRank(Number(rankResult?.rank || 1));
+      const allUsersQuery = query(usersRef, orderBy("xp", "desc"));
+      const allUsersSnapshot = await getDocs(allUsersQuery);
+      let rank = 1;
+      for (let i = 0; i < allUsersSnapshot.docs.length; i++) {
+        const u = allUsersSnapshot.docs[i].data();
+        if (u.xp > userData.xp) {
+          rank++;
+        } else {
+          break;
+        }
+      }
+      setCurrentUserRank(rank);
 
       // 4. Fetch Learning Analytics
-      const enrollments = await db
-        .select()
-        .from(courseEnrollments)
-        .where(eq(courseEnrollments.userId, userData.id));
+      const enrollmentsRef = collection(db, "courseEnrollments");
+      const userEnrollmentsQuery = query(enrollmentsRef, where("userId", "==", userData.id));
+      const enrollmentsSnapshot = await getDocs(userEnrollmentsQuery);
 
-      let coursesEnrolled = enrollments.length;
-      let coursesCompleted = enrollments.filter(e => e.isCompleted === 1).length;
+      let coursesEnrolled = enrollmentsSnapshot.size;
+      let coursesCompleted = 0;
       let quizzesCompleted = 0;
 
-      enrollments.forEach(e => {
+      enrollmentsSnapshot.forEach(doc => {
+        const e = doc.data();
+        if (e.isCompleted) coursesCompleted++;
         try {
           const quizzes = JSON.parse(e.completedQuizzes || '[]');
           quizzesCompleted += quizzes.length;
@@ -163,15 +175,13 @@ export const useStats = () => {
     }
 
     try {
-      await db
-        .update(users)
-        .set({
-          dailyStreak: newStreak,
-          lastCheckIn: now,
-          xp: userData.xp + 5, // 5 XP reward
-          coins: userData.coins + 50, // 50 coin reward
-        })
-        .where(eq(users.id, userData.id));
+      const userRef = doc(db, "users", userData.id);
+      await updateDoc(userRef, {
+        dailyStreak: newStreak,
+        lastCheckIn: now,
+        xp: userData.xp + 5,
+        coins: userData.coins + 50,
+      });
       
       await refetchUser();
       await fetchStats();
@@ -183,10 +193,10 @@ export const useStats = () => {
   };
 
   useEffect(() => {
-    if (userData) {
+    if (userData && isSignedIn) {
       fetchStats();
     }
-  }, [userData, fetchStats]);
+  }, [userData, fetchStats, isSignedIn]);
 
   return {
     rankings,
@@ -194,7 +204,7 @@ export const useStats = () => {
     recentTrophies,
     learningAnalytics,
     currentUserRank,
-    isLoading,
+    isLoading: isLoading || authLoading,
     handleCheckIn,
     refetchStats: fetchStats,
   };

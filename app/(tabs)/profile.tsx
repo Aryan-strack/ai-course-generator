@@ -2,7 +2,7 @@ import SubscriptionPaywall from "@/components/SubscriptionPaywall";
 import { useStats } from "@/hooks/useStats";
 import { useUserData } from "@/hooks/useUserData";
 import { logoutRevenueCat, useSubscription } from "@/utils/revenuecat";
-import { useClerk, useUser } from "@clerk/expo";
+import { useAuth } from "@/context/AuthContext";
 import { Ionicons } from "@expo/vector-icons";
 import { StatusBar } from "expo-status-bar";
 import { useMemo, useState } from "react";
@@ -20,8 +20,7 @@ const ICON_MAP: Record<string, any> = {
 };
 
 export default function ProfileScreen() {
-  const { user } = useUser();
-  const { signOut } = useClerk();
+  const { user, signOut } = useAuth();
   const { learningAnalytics, recentTrophies } = useStats();
   const { userData } = useUserData();
   const { isPro, isLoading: isSubscriptionLoading } = useSubscription();
@@ -75,7 +74,7 @@ export default function ProfileScreen() {
               </View>
             </View>
             <View style={styles.headerInfo}>
-              <Text style={styles.title}>{userData?.name || user?.firstName || "Explorer"}</Text>
+              <Text style={styles.title}>{userData?.name || user?.name || "Explorer"}</Text>
               <Text style={styles.rankTitle}>{userData?.rank || "Novice"}</Text>
               <View style={styles.guildBadge}>
                 <Ionicons name="shield" size={12} color="#38bdf8" style={{ marginRight: 4 }} />
@@ -84,13 +83,13 @@ export default function ProfileScreen() {
             </View>
           </View>
 
-          {/* Lore / Bio */}
-          <View style={styles.loreCard}>
-            <Ionicons name="information-circle-outline" size={16} color="#8b5cf6" style={{ marginRight: 8, marginTop: 2 }} />
-            <Text style={styles.loreText}>
-              "{userData?.bio || "A mysterious wanderer in the cyber realm. Ready to learn and conquer."}"
-            </Text>
-          </View>
+           {/* Lore / Bio */}
+           <View style={styles.loreCard}>
+             <Ionicons name="information-circle-outline" size={16} color="#8b5cf6" style={{ marginRight: 8, marginTop: 2 }} />
+             <Text style={styles.loreText}>
+               &quot;{userData?.bio || "A mysterious wanderer in the cyber realm. Ready to learn and conquer."}&quot;
+             </Text>
+           </View>
 
           {/* Wallet / Inventory */}
           <View style={styles.sectionHeader}>

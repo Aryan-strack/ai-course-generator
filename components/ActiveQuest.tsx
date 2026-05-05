@@ -43,10 +43,10 @@ export default function ActiveQuest({
             <Text style={styles.label}>NO ACTIVE QUEST</Text>
           </View>
           
-          <View style={styles.emptyContent}>
-            <Text style={styles.emptyTitle}>Your journey hasn't started yet.</Text>
-            <Text style={styles.emptySubtitle}>Choose your path, Hero! The realms await your arrival.</Text>
-          </View>
+           <View style={styles.emptyContent}>
+             <Text style={styles.emptyTitle}>Your journey hasn&apos;t started yet.</Text>
+             <Text style={styles.emptySubtitle}>Choose your path, Hero! The realms await your arrival.</Text>
+           </View>
 
           <View style={styles.buttonRow}>
             <Pressable

@@ -1,13 +1,12 @@
 import { useEffect, useState, useCallback } from "react";
-import { db } from "@/db";
-import { users, dailyBounties, courses, courseEnrollments } from "@/db/schema";
-import { eq, and, gt, sql } from "drizzle-orm";
+import { db } from "@/utils/firebase/config";
+import { collection, query, where, gt, doc, getDocs, getDoc, updateDoc, addDoc, serverTimestamp } from "firebase/firestore";
 import { useUserData } from "./useUserData";
 import { generateDailyBounties, GeneratedBounty } from "@/utils/gemini";
 import * as Haptics from "expo-haptics";
 
 export interface Bounty extends GeneratedBounty {
-  id: number;
+  id: string;
   isCompleted: boolean;
   expiresAt: Date;
 }
@@ -27,99 +26,6 @@ export const useDailyBounties = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [timeLeft, setTimeLeft] = useState<string>("");
 
-  const fetchBounties = useCallback(async () => {
-    if (!userData?.id) return;
-
-    try {
-      setIsLoading(true);
-
-      // 1. Check for existing non-expired bounties
-      const now = new Date();
-      const existingBounties = await db
-        .select()
-        .from(dailyBounties)
-        .where(
-          and(
-            eq(dailyBounties.userId, userData.id),
-            gt(dailyBounties.expiresAt, now)
-          )
-        );
-
-      if (existingBounties.length > 0) {
-        setBounties(existingBounties.map(b => ({
-          ...b,
-          isCompleted: b.isCompleted === 1,
-          rewardType: b.rewardType as "xp" | "coin" | "gem"
-        })));
-        updateTimer(existingBounties[0].expiresAt);
-      } else {
-        // 2. Refresh needed - Check for course enrollments
-        const userEnrollments = await db
-          .select({ id: courseEnrollments.id })
-          .from(courseEnrollments)
-          .where(eq(courseEnrollments.userId, userData.id))
-          .limit(1);
-
-        let newBountiesData: GeneratedBounty[];
-        
-        if (userEnrollments.length === 0) {
-          // Use hardcoded defaults for new users - NO GENERATION
-          newBountiesData = DEFAULT_BOUNTIES;
-        } else {
-          // 3. GENERATION REQUIRED
-          setIsGenerating(true);
-          try {
-            // Fetch course titles for Gemini context
-            const userCourses = await db
-              .select({ title: courses.title })
-              .from(courseEnrollments)
-              .innerJoin(courses, eq(courseEnrollments.courseId, courses.id))
-              .where(eq(courseEnrollments.userId, userData.id));
-
-            const courseTitles = userCourses.map(c => c.title);
-            newBountiesData = await generateDailyBounties(courseTitles);
-          } finally {
-            setIsGenerating(false);
-          }
-        }
-        
-        const expiresAt = new Date();
-        expiresAt.setHours(expiresAt.getHours() + REFRESH_INTERVAL_HOURS);
-
-        // 4. Save to DB
-        const insertedBounties = await Promise.all(
-          newBountiesData.map(async (data) => {
-            const result = await db.insert(dailyBounties).values({
-              userId: userData.id,
-              task: data.task,
-              rewardValue: data.rewardValue,
-              rewardType: data.rewardType,
-              isCompleted: 0,
-              expiresAt: expiresAt,
-            }).returning();
-            return result[0];
-          })
-        );
-
-        // Update user's last refresh time
-        await db.update(users)
-          .set({ lastBountyUpdate: new Date() })
-          .where(eq(users.id, userData.id));
-
-        setBounties(insertedBounties.map(b => ({
-          ...b,
-          isCompleted: false,
-          rewardType: b.rewardType as "xp" | "coin" | "gem"
-        })));
-        updateTimer(expiresAt);
-      }
-    } catch (error) {
-      console.error("Error in useDailyBounties:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [userData?.id]);
-
   const updateTimer = (expiry: Date) => {
     const update = () => {
       const now = new Date();
@@ -137,39 +43,151 @@ export const useDailyBounties = () => {
     };
     
     update();
-    const interval = setInterval(update, 60000); // Update every minute
+    const interval = setInterval(update, 60000);
     return () => clearInterval(interval);
   };
 
-  const completeBounty = async (bountyId: number) => {
+  const fetchBounties = useCallback(async () => {
+    if (!userData?.id) return;
+
+    try {
+      setIsLoading(true);
+
+      const now = new Date();
+      const bountiesRef = collection(db, "dailyBounties");
+      
+      // 1. Check for existing non-expired bounties
+      const q = query(
+        bountiesRef,
+        where("userId", "==", userData.id),
+        where("expiresAt", ">", now)
+      );
+      const existingSnapshot = await getDocs(q);
+
+      if (!existingSnapshot.empty) {
+        const bountiesList = existingSnapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            ...data,
+            isCompleted: data.isCompleted || false,
+            expiresAt: data.expiresAt instanceof Date ? data.expiresAt : 
+                       (data.expiresAt?.toDate ? data.expiresAt.toDate() : new Date(data.expiresAt)),
+            rewardType: data.rewardType as "xp" | "coin" | "gem"
+          };
+        }) as Bounty[];
+        setBounties(bountiesList);
+        updateTimer(bountiesList[0].expiresAt);
+      } else {
+        // 2. Refresh needed - Check for course enrollments
+        const enrollmentsRef = collection(db, "courseEnrollments");
+        const userEnrollmentsQuery = query(
+          enrollmentsRef,
+          where("userId", "==", userData.id)
+        );
+        const userEnrollmentsSnapshot = await getDocs(userEnrollmentsQuery);
+
+        let newBountiesData: GeneratedBounty[];
+        
+        if (userEnrollmentsSnapshot.empty) {
+          // Use hardcoded defaults for new users - NO GENERATION
+          newBountiesData = DEFAULT_BOUNTIES;
+        } else {
+          // 3. GENERATION REQUIRED
+          setIsGenerating(true);
+          try {
+            // Fetch course titles for Gemini context
+            const courseTitles: string[] = [];
+            for (const enrollmentDoc of userEnrollmentsSnapshot.docs) {
+              const data = enrollmentDoc.data();
+              const courseDoc = await getDoc(doc(db, "courses", data.courseId));
+              if (courseDoc.exists()) {
+                courseTitles.push(courseDoc.data().title);
+              }
+            }
+            newBountiesData = await generateDailyBounties(courseTitles);
+          } finally {
+            setIsGenerating(false);
+          }
+        }
+        
+        const expiresAt = new Date();
+        expiresAt.setHours(expiresAt.getHours() + REFRESH_INTERVAL_HOURS);
+
+        // 4. Save to Firestore
+        const insertedBounties: Bounty[] = [];
+        for (const data of newBountiesData) {
+          const bountyRef = await addDoc(bountiesRef, {
+            userId: userData.id,
+            task: data.task,
+            rewardValue: data.rewardValue,
+            rewardType: data.rewardType,
+            isCompleted: false,
+            expiresAt: expiresAt,
+            createdAt: serverTimestamp(),
+          });
+          insertedBounties.push({
+            id: bountyRef.id,
+            ...data,
+            isCompleted: false,
+            rewardType: data.rewardType as "xp" | "coin" | "gem",
+            expiresAt: expiresAt,
+          });
+        }
+
+        // Update user's last refresh time
+        const userRef = doc(db, "users", userData.id);
+        await updateDoc(userRef, {
+          lastBountyUpdate: expiresAt,
+        });
+
+        setBounties(insertedBounties);
+        updateTimer(expiresAt);
+      }
+    } catch (error) {
+      console.error("Error in useDailyBounties:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [userData?.id]);
+
+  const completeBounty = async (bountyId: string) => {
     const bounty = bounties.find(b => b.id === bountyId);
     if (!bounty || bounty.isCompleted) return;
 
     try {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-      // 1. Update bounty in DB
-      await db.update(dailyBounties)
-        .set({ isCompleted: 1 })
-        .where(eq(dailyBounties.id, bountyId));
+      // 1. Update bounty in Firestore
+      await updateDoc(doc(db, "dailyBounties", bountyId), {
+        isCompleted: true,
+      });
 
       // 2. Reward user
-      const rewardVal = parseInt(bounty.rewardValue);
-      const updateData: any = {};
-      if (bounty.rewardType === "xp") updateData.xp = sql`${users.xp} + ${rewardVal}`;
-      else if (bounty.rewardType === "coin") updateData.coins = sql`${users.coins} + ${rewardVal}`;
-      // Note: Gems aren't in the schema yet, but we can add or ignore for now
-      
-      await db.update(users)
-        .set(updateData)
-        .where(eq(users.id, userData!.id));
+      const userRef = doc(db, "users", userData!.id);
+      const userDoc = await getDoc(userRef);
+      if (userDoc.exists()) {
+        const currentUser = userDoc.data();
+        const rewardVal = parseInt(bounty.rewardValue);
+        const updateData: any = {};
+        
+        if (bounty.rewardType === "xp") {
+          updateData.xp = (currentUser.xp || 0) + rewardVal;
+        } else if (bounty.rewardType === "coin") {
+          updateData.coins = (currentUser.coins || 0) + rewardVal;
+        } else if (bounty.rewardType === "gem") {
+          updateData.gems = (currentUser.gems || 0) + rewardVal;
+        }
+        
+        await updateDoc(userRef, updateData);
+      }
 
       // 3. Update local state
       setBounties(prev => prev.map(b => 
         b.id === bountyId ? { ...b, isCompleted: true } : b
       ));
       
-      refetchUser(); // Refresh top UI stats
+      refetchUser();
     } catch (error) {
       console.error("Error completing bounty:", error);
     }
@@ -187,26 +205,19 @@ export const useDailyBounties = () => {
 
       let shouldComplete = false;
 
-      // Logic for automatic completion
       if (bounty.task.toLowerCase().includes("profile")) {
-        // Assume user has profile if we have userData
         if (userData.name && userData.email) shouldComplete = true;
       } else if (bounty.task.toLowerCase().includes("create") || bounty.task.toLowerCase().includes("explore")) {
-        // Check if user has any courses
-        const userCourses = await db
-          .select()
-          .from(courseEnrollments)
-          .where(eq(courseEnrollments.userId, userData.id))
-          .limit(1);
-        if (userCourses.length > 0) shouldComplete = true;
+        const enrollmentsRef = collection(db, "courseEnrollments");
+        const q = query(enrollmentsRef, where("userId", "==", userData.id));
+        const snapshot = await getDocs(q);
+        if (!snapshot.empty) shouldComplete = true;
       }
 
       if (shouldComplete) {
-        // Reuse completeBounty logic without haptics for "auto" feel or add subtle feedback
-        await db.update(dailyBounties)
-          .set({ isCompleted: 1 })
-          .where(eq(dailyBounties.id, bounty.id));
-        
+        await updateDoc(doc(db, "dailyBounties", bounty.id), {
+          isCompleted: true,
+        });
         newBounties[i] = { ...bounty, isCompleted: true };
         updated = true;
       }

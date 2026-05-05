@@ -91,7 +91,7 @@ export default function SubtopicQuiz({ quiz, onSuccess }: SubtopicQuizProps) {
       </View>
 
       {isCorrect === false && (
-        <Text style={styles.hint}>That's not quite right. Try again!</Text>
+        <Text style={styles.hint}>That&apos;s not quite right. Try again!</Text>
       )}
 
       {isCorrect === true && (

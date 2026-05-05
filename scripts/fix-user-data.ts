@@ -1,44 +1,54 @@
-import { neon } from "@neondatabase/serverless";
-import "dotenv/config";
-import { eq } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/neon-http";
-import * as schema from "../db/schema";
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  getDocs,
+  updateDoc,
+  doc,
+  query 
+} from 'firebase/firestore';
+import * as dotenv from 'dotenv';
+dotenv.config();
 
-const databaseUrl = process.env.EXPO_PUBLIC_DATABASE_URL;
+const firebaseConfig = {
+  apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
+};
 
-if (!databaseUrl) {
-  console.error("EXPO_PUBLIC_DATABASE_URL is not set");
-  process.exit(1);
-}
-
-const sql = neon(databaseUrl);
-const db = drizzle({ client: sql, schema });
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
 
 async function fixUserData() {
   console.log("FIX_USER_DATA: Starting...");
 
   try {
-    const allUsers = await db.select().from(schema.users);
+    const usersRef = collection(db, "users");
+    const usersSnapshot = await getDocs(usersRef);
 
-    for (const user of allUsers) {
+    for (const userDoc of usersSnapshot.docs) {
+      const user = userDoc.data();
+      const currentLevel = user.level || 1;
+
       // Get requirements for next level
-      const [nextLevel] = await db
-        .select()
-        .from(schema.levels)
-        .where(eq(schema.levels.levelNumber, user.level + 1))
-        .limit(1);
+      const levelsRef = collection(db, "levels");
+      const levelQuery = query(levelsRef, where("levelNumber", "==", currentLevel + 1));
+      const levelSnapshot = await getDocs(levelQuery);
 
-      if (nextLevel) {
+      if (!levelSnapshot.empty) {
+        const nextLevel = levelSnapshot.docs[0].data();
+
         console.log(
-          `Updating user ${user.name} (Level ${user.level}) -> nextLevel XP: ${nextLevel.xpRequired}, Coins: ${nextLevel.coinsRequired}`,
+          `Updating user ${user.name} (Level ${currentLevel}) -> nextLevel XP: ${nextLevel.xpRequired}, Coins: ${nextLevel.coinsRequired}`,
         );
-        await db
-          .update(schema.users)
-          .set({
-            nextLevelXp: nextLevel.xpRequired,
-            nextLevelCoins: nextLevel.coinsRequired,
-          })
-          .where(eq(schema.users.id, user.id));
+        
+        await updateDoc(doc(db, "users", userDoc.id), {
+          nextLevelXp: nextLevel.xpRequired,
+          nextLevelCoins: nextLevel.coinsRequired,
+        });
       }
     }
 

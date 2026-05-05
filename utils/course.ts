@@ -1,11 +1,16 @@
-import { db } from "@/db";
 import {
-    chapters as chaptersTable,
-    courseEnrollments as courseEnrollmentsTable,
-    courses as coursesTable,
-    quizzes as quizzesTable,
-    subtopics as subtopicsTable,
-} from "@/db/schema";
+  collection,
+  addDoc,
+  doc,
+  setDoc,
+  getDoc,
+  updateDoc,
+  getDocs,
+  query,
+  where,
+  serverTimestamp,
+} from "firebase/firestore";
+import { db } from "@/utils/firebase/config";
 import { handleGamificationAction } from "./gamification";
 import { generateCourseBannerImage, generateCourseContent } from "./gemini";
 import { uploadToImageKit } from "./imagekit";
@@ -13,7 +18,7 @@ import { uploadToImageKit } from "./imagekit";
 export async function forgeCourse(
   topic: string,
   difficulty: string,
-  userId: number,
+  userId: string,
 ) {
   try {
     console.log(
@@ -50,61 +55,74 @@ export async function forgeCourse(
       );
     }
 
-    const [newCourse] = await db
-      .insert(coursesTable)
-      .values({
-        title: courseData.title,
-        description: courseData.description,
-        category: courseData.category,
-        totalChapters: courseData.chapters.length,
-        bannerImage: bannerImageUrl,
-        difficulty: difficulty,
-        icon: courseData.icon,
-      })
-      .returning();
+    // Step 3: Create course document in Firestore
+    const coursesRef = collection(db, "courses");
+    const newCourseRef = doc(coursesRef);
+    const newCourseData = {
+      title: courseData.title,
+      description: courseData.description,
+      category: courseData.category,
+      totalChapters: courseData.chapters.length,
+      bannerImage: bannerImageUrl,
+      difficulty: difficulty,
+      icon: courseData.icon,
+      rewardXp: 100,
+      createdAt: serverTimestamp(),
+    };
+    await setDoc(newCourseRef, newCourseData);
+    const newCourse = { id: newCourseRef.id, ...newCourseData };
 
-    await db.insert(courseEnrollmentsTable).values({
+    // Step 4: Create course enrollment for the user
+    const enrollmentsRef = collection(db, "courseEnrollments");
+    await addDoc(enrollmentsRef, {
       userId: userId,
       courseId: newCourse.id,
       currentChapter: "Chapter 1",
       progress: 0,
-      isCompleted: 0,
+      isCompleted: false,
+      completedQuizzes: [],
+      completedChapters: [],
+      lastAccessedAt: serverTimestamp(),
     });
 
+    // Step 5: Create chapters, subtopics, and quizzes
     for (let i = 0; i < courseData.chapters.length; i++) {
       const chapter = courseData.chapters[i];
-      const [newChapter] = await db
-        .insert(chaptersTable)
-        .values({
-          courseId: newCourse.id,
-          title: chapter.title,
-          orderNumber: i + 1,
-        })
-        .returning();
+      const chaptersRef = collection(db, "chapters");
+      const newChapterRef = doc(chaptersRef);
+      await setDoc(newChapterRef, {
+        courseId: newCourse.id,
+        title: chapter.title,
+        orderNumber: i + 1,
+        createdAt: serverTimestamp(),
+      });
 
       for (let j = 0; j < chapter.subtopics.length; j++) {
         const subtopic = chapter.subtopics[j];
-        const [newSubtopic] = await db
-          .insert(subtopicsTable)
-          .values({
-            chapterId: newChapter.id,
-            title: subtopic.title,
-            content: subtopic.content,
-            orderNumber: j + 1,
-          })
-          .returning();
+        const subtopicsRef = collection(db, "subtopics");
+        const newSubtopicRef = doc(subtopicsRef);
+        await setDoc(newSubtopicRef, {
+          chapterId: newChapterRef.id,
+          title: subtopic.title,
+          content: subtopic.content,
+          orderNumber: j + 1,
+          createdAt: serverTimestamp(),
+        });
 
-        await db.insert(quizzesTable).values({
-          subtopicId: newSubtopic.id,
+        // Create quiz for this subtopic
+        const quizzesRef = collection(db, "quizzes");
+        await addDoc(quizzesRef, {
+          subtopicId: newSubtopicRef.id,
           question: subtopic.quiz.question,
           options: JSON.stringify(subtopic.quiz.options),
           correctAnswer: subtopic.quiz.correctAnswer,
+          createdAt: serverTimestamp(),
         });
       }
     }
 
     console.log(
-      "successfully forget and enrolled user to course: ",
+      "Successfully forged and enrolled user to course: ",
       newCourse.id,
     );
 
@@ -118,3 +136,82 @@ export async function forgeCourse(
     throw error;
   }
 }
+
+/**
+ * Get user's enrolled courses
+ */
+export async function getUserEnrolledCourses(userId: string) {
+  try {
+    const enrollmentsRef = collection(db, "courseEnrollments");
+    const q = query(enrollmentsRef, where("userId", "==", userId));
+    const snapshot = await getDocs(q);
+    
+    const enrollments = [];
+    for (const docSnap of snapshot.docs) {
+      const data = docSnap.data();
+      const courseDoc = await getDoc(doc(db, "courses", data.courseId));
+      if (courseDoc.exists()) {
+        const courseData = courseDoc.data();
+        enrollments.push({
+          id: data.courseId,
+          ...courseData,
+          enrollmentId: docSnap.id,
+          progress: data.progress || 0,
+          isCompleted: data.isCompleted || false,
+          currentChapter: data.currentChapter || null,
+          lastAccessedAt: data.lastAccessedAt ? 
+            (data.lastAccessedAt.toDate ? data.lastAccessedAt.toDate() : new Date(data.lastAccessedAt)) : 
+            null,
+        });
+      }
+    }
+    return enrollments;
+  } catch (error) {
+    console.error("Error fetching enrolled courses:", error);
+    return [];
+  }
+}
+
+/**
+ * Get course by ID
+ */
+export async function getCourseById(courseId: string) {
+  try {
+    const docSnap = await getDoc(doc(db, "courses", courseId));
+    if (docSnap.exists()) {
+      return { id: docSnap.id, ...docSnap.data() };
+    }
+    return null;
+  } catch (error) {
+    console.error("Error fetching course:", error);
+    return null;
+  }
+}
+
+/**
+ * Update course progress
+ */
+export async function updateCourseProgress(
+  enrollmentId: string,
+  progress: number,
+  currentChapter: string,
+  isCompleted: boolean = false
+) {
+  try {
+    const enrollmentRef = doc(db, "courseEnrollments", enrollmentId);
+    const updateData: any = {
+      progress,
+      currentChapter,
+      lastAccessedAt: serverTimestamp(),
+    };
+    if (isCompleted) {
+      updateData.isCompleted = true;
+    }
+    await updateDoc(enrollmentRef, updateData);
+    return true;
+  } catch (error) {
+    console.error("Error updating course progress:", error);
+    return false;
+  }
+}
+

@@ -1,14 +1,16 @@
-import { db } from "@/db";
 import {
-    courseEnrollments,
-    courses,
-    dailyBounties,
-    levels,
-    trophies,
-    users,
-    userTrophies,
-} from "@/db/schema";
-import { and, count, eq, gt } from "drizzle-orm";
+  collection,
+  query,
+  where,
+  and,
+  getDocs,
+  updateDoc,
+  doc,
+  addDoc,
+  serverTimestamp,
+  increment,
+} from "firebase/firestore";
+import { db } from "@/utils/firebase/config";
 import { Alert } from "react-native";
 import { generateDailyBounties } from "./gemini";
 
@@ -19,7 +21,7 @@ export type GamificationAction =
   | "ENROLL_COURSE";
 
 export async function handleGamificationAction(
-  userId: number,
+  userId: string,
   action: GamificationAction,
   context?: string,
 ) {
@@ -29,7 +31,6 @@ export async function handleGamificationAction(
     );
 
     await checkAndCompleteBounties(userId, action);
-
     await checkAndUnlockTrophies(userId);
 
     if (action === "COMPLETE_CHAPTER" || action === "CREATE_COURSE") {
@@ -41,21 +42,22 @@ export async function handleGamificationAction(
 }
 
 async function checkAndCompleteBounties(
-  userId: number,
+  userId: string,
   action: GamificationAction,
 ) {
-  const activeBounties = await db
-    .select()
-    .from(dailyBounties)
-    .where(
-      and(eq(dailyBounties.userId, userId), eq(dailyBounties.isCompleted, 0)),
-    );
+  const bountiesRef = collection(db, "dailyBounties");
+  const activeBountiesQuery = query(
+    bountiesRef,
+    where("userId", "==", userId),
+    where("isCompleted", "==", false)
+  );
+  const snapshot = await getDocs(activeBountiesQuery);
 
-  for (const bounty of activeBounties) {
+  for (const docSnap of snapshot.docs) {
+    const bounty = docSnap.data();
     let isMatch = false;
-    const task = bounty.task.toLowerCase();
+    const task = (bounty.task || "").toLowerCase();
 
-    // Fuzzy matching for AI generated tasks
     switch (action) {
       case "CREATE_COURSE":
         if (
@@ -95,15 +97,14 @@ async function checkAndCompleteBounties(
     }
 
     if (isMatch) {
-      await db
-        .update(dailyBounties)
-        .set({ isCompleted: 1 })
-        .where(eq(dailyBounties.id, bounty.id));
+      await updateDoc(doc(db, "dailyBounties", docSnap.id), {
+        isCompleted: true,
+      });
 
       await rewardUser(
         userId,
-        parseInt(bounty.rewardValue),
-        bounty.rewardType as "xp" | "coin",
+        parseInt(bounty.rewardValue || "0"),
+        bounty.rewardType as "xp" | "coin" | "gem",
       );
       Alert.alert(
         "Bounty Completed! 🎯",
@@ -114,22 +115,20 @@ async function checkAndCompleteBounties(
 }
 
 async function replenishBountiesIfNeeded(
-  userId: number,
+  userId: string,
   recentAchievement?: string,
 ) {
   const now = new Date();
-  const activeBounties = await db
-    .select()
-    .from(dailyBounties)
-    .where(
-      and(
-        eq(dailyBounties.userId, userId),
-        eq(dailyBounties.isCompleted, 0),
-        gt(dailyBounties.expiresAt, now),
-      ),
-    );
+  const bountiesRef = collection(db, "dailyBounties");
+  const activeQuery = query(
+    bountiesRef,
+    where("userId", "==", userId),
+    where("isCompleted", "==", false),
+    where("expiresAt", ">", now)
+  );
+  const snapshot = await getDocs(activeQuery);
 
-  const slotsNeeded = 3 - activeBounties.length;
+  const slotsNeeded = 3 - snapshot.size;
 
   if (slotsNeeded > 0) {
     console.log(
@@ -137,32 +136,37 @@ async function replenishBountiesIfNeeded(
     );
 
     // Fetch course titles for context
-    const userEnrollments = await db
-      .select({ title: courses.title })
-      .from(courseEnrollments)
-      .innerJoin(courses, eq(courseEnrollments.courseId, courses.id))
-      .where(eq(courseEnrollments.userId, userId));
+    const enrollmentsRef = collection(db, "courseEnrollments");
+    const enrollmentsQuery = query(enrollmentsRef, where("userId", "==", userId));
+    const enrollmentsSnapshot = await getDocs(enrollmentsQuery);
 
-    const courseTitles = userEnrollments.map((c) => c.title);
+    const courseTitles: string[] = [];
+    for (const enrollmentDoc of enrollmentsSnapshot.docs) {
+      const data = enrollmentDoc.data();
+      const courseDoc = await getDoc(doc(db, "courses", data.courseId));
+      if (courseDoc.exists()) {
+        courseTitles.push(courseDoc.data().title);
+      }
+    }
+
     const newBountiesData = await generateDailyBounties(
       courseTitles,
       recentAchievement,
     );
 
-    // Take only what's needed to fill to 3
     const toAdd = newBountiesData.slice(0, slotsNeeded);
-
     const expiresAt = new Date();
-    expiresAt.setHours(expiresAt.getHours() + 24); // Fresh AI bounties last 24h
+    expiresAt.setHours(expiresAt.getHours() + 24);
 
     for (const data of toAdd) {
-      await db.insert(dailyBounties).values({
+      await addDoc(bountiesRef, {
         userId,
         task: data.task,
         rewardValue: data.rewardValue,
         rewardType: data.rewardType,
-        isCompleted: 0,
+        isCompleted: false,
         expiresAt,
+        createdAt: serverTimestamp(),
       });
     }
 
@@ -170,50 +174,47 @@ async function replenishBountiesIfNeeded(
   }
 }
 
-export async function checkAndUnlockTrophies(userId: number) {
-  const allTrophies = await db.select().from(trophies);
-  const earnedTrophyIds = (
-    await db
-      .select({ id: userTrophies.trophyId })
-      .from(userTrophies)
-      .where(eq(userTrophies.userId, userId))
-  ).map((t) => t.id);
+export async function checkAndUnlockTrophies(userId: string) {
+  const trophiesRef = collection(db, "trophies");
+  const allTrophiesSnapshot = await getDocs(trophiesRef);
 
-  const [userProfile] = await db
-    .select()
-    .from(users)
-    .where(eq(users.id, userId))
-    .limit(1);
-  if (!userProfile) return;
+  const userTrophiesRef = collection(db, "userTrophies");
+  const earnedQuery = query(userTrophiesRef, where("userId", "==", userId));
+  const earnedSnapshot = await getDocs(earnedQuery);
+  const earnedTrophyIds = earnedSnapshot.docs.map(d => d.data().trophyId);
 
-  for (const trophy of allTrophies) {
-    if (earnedTrophyIds.includes(trophy.id)) continue;
+  const userDoc = await getDoc(doc(db, "users", userId));
+  if (!userDoc.exists()) return;
+  const userProfile = userDoc.data();
+
+  for (const trophyDoc of allTrophiesSnapshot.docs) {
+    const trophy = trophyDoc.data();
+    if (earnedTrophyIds.includes(trophyDoc.id)) continue;
 
     let conditionMet = false;
     switch (trophy.conditionType) {
       case "level":
-        if (userProfile.level >= trophy.conditionValue) conditionMet = true;
+        if ((userProfile.level || 1) >= trophy.conditionValue) conditionMet = true;
         break;
       case "xp":
-        if (userProfile.xp >= trophy.conditionValue) conditionMet = true;
+        if ((userProfile.xp || 0) >= trophy.conditionValue) conditionMet = true;
         break;
       case "coin_count":
-        if (userProfile.coins >= trophy.conditionValue) conditionMet = true;
+        if ((userProfile.coins || 0) >= trophy.conditionValue) conditionMet = true;
         break;
       case "course_count":
-        const enrollments = await db
-          .select({ count: count() })
-          .from(courseEnrollments)
-          .where(eq(courseEnrollments.userId, userId));
-        if (enrollments[0].count >= trophy.conditionValue) conditionMet = true;
+        const enrollmentsRef = collection(db, "courseEnrollments");
+        const q = query(enrollmentsRef, where("userId", "==", userId));
+        const enrollmentsSnapshot = await getDocs(q);
+        if (enrollmentsSnapshot.size >= trophy.conditionValue) conditionMet = true;
         break;
-      // Add more cases as needed (chapter_count etc.)
     }
 
     if (conditionMet) {
-      await db.insert(userTrophies).values({
-        userId: userId,
-        trophyId: trophy.id,
+      await addDoc(userTrophiesRef, {
+        userId,
+        trophyId: trophyDoc.id,
+        earnedAt: serverTimestamp(),
       });
       Alert.alert(
         "Hidden Gem Unlocked! 💎",
@@ -224,19 +225,17 @@ export async function checkAndUnlockTrophies(userId: number) {
 }
 
 export async function rewardUser(
-  userId: number,
+  userId: string,
   amount: number,
-  type: "xp" | "coin",
+  type: "xp" | "coin" | "gem",
 ) {
-  const [user] = await db
-    .select()
-    .from(users)
-    .where(eq(users.id, userId))
-    .limit(1);
-  if (!user) return;
+  const userRef = doc(db, "users", userId);
+  const userDoc = await getDoc(userRef);
+  if (!userDoc.exists()) return;
 
-  let newXp = user.xp;
-  let newCoins = user.coins;
+  const user = userDoc.data();
+  let newXp = user.xp || 0;
+  let newCoins = user.coins || 0;
 
   if (type === "coin") {
     newCoins += amount;
@@ -244,69 +243,61 @@ export async function rewardUser(
     newXp += amount;
   }
 
-  // Update initial balance
-  await db
-    .update(users)
-    .set({
-      xp: newXp,
-      coins: newCoins,
-    })
-    .where(eq(users.id, userId));
-
   // Check for level up
-  let currentLevelNum = user.level;
-  let currentRank = user.rank;
+  let currentLevelNum = user.level || 1;
+  let currentRank = user.rank || "Novice";
   let leveledUp = false;
 
-  // Iterate to handle multiple level ups if possible
   while (true) {
     const nextLevelNum = currentLevelNum + 1;
-    const [nextLevelData] = await db
-      .select()
-      .from(levels)
-      .where(eq(levels.levelNumber, nextLevelNum))
-      .limit(1);
+    const levelsRef = collection(db, "levels");
+    const levelQuery = query(levelsRef, where("levelNumber", "==", nextLevelNum));
+    const levelSnapshot = await getDocs(levelQuery);
 
-    if (!nextLevelData) break; // Max level reached
+    if (levelSnapshot.empty) break;
 
-    // BOTH XP and COINS must meet requirements
-    if (
-      newXp >= nextLevelData.xpRequired &&
-      newCoins >= nextLevelData.coinsRequired
-    ) {
+    const nextLevelData = levelSnapshot.docs[0].data();
+
+    if (newXp >= (nextLevelData.xpRequired || 0) && newCoins >= (nextLevelData.coinsRequired || 0)) {
       currentLevelNum = nextLevelNum;
-      currentRank = nextLevelData.rankName;
-      newCoins += nextLevelData.coinsReward; // Give level up reward
+      currentRank = nextLevelData.rankName || currentRank;
+      newCoins += nextLevelData.coinsReward || 0;
       leveledUp = true;
     } else {
       break;
     }
   }
 
-  if (leveledUp) {
-    // Get info for the NEW next level after leveling up
-    const [newNextLevel] = await db
-      .select()
-      .from(levels)
-      .where(eq(levels.levelNumber, currentLevelNum + 1))
-      .limit(1);
+  const updateData: any = {
+    xp: newXp,
+    coins: newCoins,
+  };
 
-    await db
-      .update(users)
-      .set({
-        level: currentLevelNum,
-        rank: currentRank,
-        coins: newCoins, // Includes rewards
-        nextLevelXp: newNextLevel ? newNextLevel.xpRequired : user.nextLevelXp,
-        nextLevelCoins: newNextLevel
-          ? newNextLevel.coinsRequired
-          : user.nextLevelCoins,
-      })
-      .where(eq(users.id, userId));
+  if (leveledUp) {
+    updateData.level = currentLevelNum;
+    updateData.rank = currentRank;
+
+    const levelsRef = collection(db, "levels");
+    const nextLevelQuery = query(levelsRef, where("levelNumber", "==", currentLevelNum + 1));
+    const nextLevelSnapshot = await getDocs(nextLevelQuery);
+
+    if (!nextLevelSnapshot.empty) {
+      const nextLevelData = nextLevelSnapshot.docs[0].data();
+      updateData.nextLevelXp = nextLevelData.xpRequired;
+      updateData.nextLevelCoins = nextLevelData.coinsRequired;
+    }
 
     Alert.alert(
       "LEVEL UP! 🚀",
       `Congratulations Hero! You are now Level ${currentLevelNum} (${currentRank})!`,
     );
   }
+
+  await updateDoc(userRef, updateData);
+}
+
+// Helper to get a doc
+async function getDoc(docRef: any) {
+  const snap = await getDoc(docRef);
+  return snap;
 }

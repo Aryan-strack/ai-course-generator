@@ -1,33 +1,26 @@
-import { useSyncUser } from "@/hooks/useSyncUser";
-import { tokenCache } from "@/utils/cache";
-import { configureRevenueCat, syncRevenueCatUser } from "@/utils/revenuecat";
-import { ClerkLoaded, ClerkProvider, useUser } from "@clerk/expo";
-import { Stack } from "expo-router";
 import { useEffect } from "react";
-
-const publishableKey = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY!;
-
-if (!publishableKey) {
-  throw new Error(
-    "Missing Publishable Key. Please set EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY in your .env",
-  );
-}
+import { Stack } from "expo-router";
+import { AuthProvider, useAuth } from "@/context/AuthContext";
+import { syncRevenueCatUser } from "@/utils/revenuecat";
+import { useSyncUser } from "@/hooks/useSyncUser";
 
 /**
  * Initial component to handle user synchronization upon app load.
  */
 function InitialLayout() {
   useSyncUser();
-  const { user, isLoaded, isSignedIn } = useUser();
+  const { user, isSignedIn, refreshUser } = useAuth();
 
   useEffect(() => {
     void configureRevenueCat();
   }, []);
 
   useEffect(() => {
-    if (!isLoaded || !isSignedIn || !user?.id) return;
-    void syncRevenueCatUser(user.id);
-  }, [isLoaded, isSignedIn, user?.id]);
+    if (isSignedIn && user?.id) {
+      void syncRevenueCatUser(user.id);
+      void refreshUser();
+    }
+  }, [isSignedIn, user?.id, refreshUser]);
 
   return (
     <Stack
@@ -40,10 +33,12 @@ function InitialLayout() {
 
 export default function RootLayout() {
   return (
-    <ClerkProvider tokenCache={tokenCache} publishableKey={publishableKey}>
-      <ClerkLoaded>
-        <InitialLayout />
-      </ClerkLoaded>
-    </ClerkProvider>
+    <AuthProvider>
+      <InitialLayout />
+    </AuthProvider>
   );
+}
+
+async function configureRevenueCat() {
+  // RevenueCat disabled for now
 }

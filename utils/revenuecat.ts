@@ -43,7 +43,7 @@ export async function configureRevenueCat() {
   return false;
 }
 
-export async function syncRevenueCatUser(userId?: string | null) {
+export async function syncRevenueCatUser(userId?: string | number | null) {
   void userId;
   return null;
 }

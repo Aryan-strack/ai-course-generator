@@ -17,7 +17,7 @@ import Svg, { Path } from "react-native-svg";
 import { db } from "@/db";
 import { courses, chapters as chaptersTable, courseEnrollments, users } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
-import { useUser } from "@clerk/expo";
+import { useAuth } from "@/context/AuthContext";
 import ChapterMapNode from "@/components/ChapterMapNode";
 
 const { width, height } = Dimensions.get("window");
@@ -27,7 +27,7 @@ const ZIGZAG_OFFSET = 60;
 export default function CourseMapScreen() {
   const { id } = useLocalSearchParams();
   const router = useRouter();
-  const { user } = useUser();
+  const { user } = useAuth();
   const scrollViewRef = useRef<ScrollView>(null);
 
   const [course, setCourse] = useState<any>(null);
@@ -41,10 +41,8 @@ export default function CourseMapScreen() {
     try {
       setIsLoading(true);
 
-      // 1. Get DB User ID
-      const userRes = await db.select({ id: users.id }).from(users).where(eq(users.clerkId, user.id)).limit(1);
-      if (userRes.length === 0) return;
-      const userId = userRes[0].id;
+      // User ID is directly available
+      const userId = user.id;
 
       // 2. Fetch Course
       const courseRes = await db.select().from(courses).where(eq(courses.id, parseInt(id as string))).limit(1);

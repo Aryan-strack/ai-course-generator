@@ -41,7 +41,7 @@ export default function CampScreen() {
 
         <View style={styles.topHeader}>
           <View>
-            <Text style={styles.headerTitle}>HERO'S CAMP</Text>
+            <Text style={styles.headerTitle}>HERO&apos;S CAMP</Text>
             <Text style={styles.headerSubtitle}>
               {isUserLoading ? "Loading..." : `Welcome back, ${displayName}`}
             </Text>

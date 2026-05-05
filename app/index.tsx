@@ -1,11 +1,25 @@
-import { useAuth } from "@clerk/expo";
+import { useAuth } from "@/context/AuthContext";
 import { Link, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View, ActivityIndicator } from "react-native";
 
 export default function Index() {
-  const { isSignedIn } = useAuth();
+  const { isSignedIn, isLoading } = useAuth();
   const router = useRouter();
+
+  if (isLoading) {
+    return (
+      <View style={styles.container}>
+        <StatusBar style="light" />
+        <View style={[styles.glow, styles.glowTop]} />
+        <View style={[styles.glow, styles.glowBottom]} />
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#a855f7" />
+          <Text style={styles.loadingText}>LOADING...</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -210,11 +224,23 @@ const styles = StyleSheet.create({
     width: "100%",
     alignItems: "center",
   },
-  signedInText: {
-    fontSize: 12,
-    fontWeight: "900",
-    color: "#10b981",
-    letterSpacing: 2,
-    marginBottom: 16,
-  },
-});
+   signedInText: {
+     fontSize: 12,
+     fontWeight: "900",
+     color: "#10b981",
+     letterSpacing: 2,
+     marginBottom: 16,
+   },
+   loadingContainer: {
+     flex: 1,
+     justifyContent: "center",
+     alignItems: "center",
+   },
+   loadingText: {
+     color: "#a855f7",
+     fontSize: 12,
+     fontWeight: "900",
+     letterSpacing: 2,
+     marginTop: 16,
+   },
+ });

@@ -1,44 +1,44 @@
-import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useState, useCallback } from "react";
-import { 
-  StyleSheet, 
-  Text, 
-  View, 
-  ScrollView, 
-  Pressable, 
-  ActivityIndicator, 
-  Dimensions,
-  Alert,
-  Image
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { StatusBar } from "expo-status-bar";
-import { 
-  ChevronLeft, 
-  BookOpen, 
-  CheckCircle2, 
-  Play, 
-  Zap, 
-  Trophy,
-  ArrowRight,
-  ArrowLeft,
-  AlertTriangle
-} from "lucide-react-native";
-import { db } from "@/db";
-import { courses, chapters as chaptersTable, subtopics as subtopicsTable, quizzes as quizzesTable, courseEnrollments, users } from "@/db/schema";
-import { eq, and, sql } from "drizzle-orm";
-import { useUser } from "@clerk/expo";
-import { handleGamificationAction, rewardUser } from "@/utils/gamification";
-import * as Haptics from "expo-haptics";
-import SubtopicQuiz from "@/components/SubtopicQuiz";
-import { GamifiedToast, ChapterCompleteDialog } from "@/components/RewardUI";
+ import { useLocalSearchParams, useRouter } from "expo-router";
+ import { useEffect, useState, useCallback } from "react";
+ import { 
+   StyleSheet, 
+   Text, 
+   View, 
+   ScrollView, 
+   Pressable, 
+   ActivityIndicator, 
+   Dimensions,
+   Alert,
+   Image
+ } from "react-native";
+ import { SafeAreaView } from "react-native-safe-area-context";
+ import { StatusBar } from "expo-status-bar";
+ import { 
+   ChevronLeft, 
+   BookOpen, 
+   CheckCircle2, 
+   Play, 
+   Zap, 
+   Trophy,
+   ArrowRight,
+   ArrowLeft,
+   AlertTriangle
+ } from "lucide-react-native";
+ import { db } from "@/db";
+ import { courses, chapters as chaptersTable, subtopics as subtopicsTable, quizzes as quizzesTable, courseEnrollments, users } from "@/db/schema";
+ import { eq, and, sql } from "drizzle-orm";
+ import { useAuth } from "@/context/AuthContext";
+ import { handleGamificationAction, rewardUser } from "@/utils/gamification";
+ import * as Haptics from "expo-haptics";
+ import SubtopicQuiz from "@/components/SubtopicQuiz";
+ import { GamifiedToast, ChapterCompleteDialog } from "@/components/RewardUI";
 
-const { width } = Dimensions.get("window");
+ const { width } = Dimensions.get("window");
 
-export default function CourseSessionScreen() {
-  const { id, chapterIndex } = useLocalSearchParams();
-  const router = useRouter();
-  const { user } = useUser();
+ export default function CourseSessionScreen() {
+   const { id, chapterIndex } = useLocalSearchParams();
+   const router = useRouter();
+   const { user } = useAuth();
   const [course, setCourse] = useState<any>(null);
   const [chapters, setChapters] = useState<any[]>([]);
   const [currentChapterIndex, setCurrentChapterIndex] = useState(0);
@@ -65,7 +65,7 @@ export default function CourseSessionScreen() {
       setIsLoading(true);
       
       // 1. Get DB User ID
-      const userRes = await db.select({ id: users.id }).from(users).where(eq(users.clerkId, user.id)).limit(1);
+      const userRes = await db.select({ id: users.id }).from(users).where(eq(users.id, user.id)).limit(1);
       if (userRes.length === 0) return;
       setUserId(userRes[0].id);
 

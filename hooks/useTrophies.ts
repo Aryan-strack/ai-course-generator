@@ -1,11 +1,17 @@
-import { useUser } from "@clerk/expo";
+import { useAuth } from "@/context/AuthContext";
 import { useEffect, useState, useCallback } from "react";
-import { db } from "@/db";
-import { trophies, userTrophies, users } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
+import { db } from "@/utils/firebase/config";
+import {
+  collection,
+  query,
+  where,
+  getDocs,
+  getDoc,
+  doc,
+} from "firebase/firestore";
 
 export interface Trophy {
-  id: number;
+  id: string;
   name: string;
   description: string;
   icon: string;
@@ -16,13 +22,13 @@ export interface Trophy {
 }
 
 export const useTrophies = () => {
-  const { user, isLoaded, isSignedIn } = useUser();
+  const { user, isSignedIn, isLoading: authLoading } = useAuth();
   const [allTrophies, setAllTrophies] = useState<Trophy[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
   const fetchTrophyData = useCallback(async () => {
-    if (!isLoaded || !isSignedIn || !user) {
+    if (!isSignedIn || !user) {
       setIsLoading(false);
       return;
     }
@@ -30,38 +36,45 @@ export const useTrophies = () => {
     try {
       setIsLoading(true);
 
-      // 1. Get the local user ID first
-      const userResult = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.clerkId, user.id))
-        .limit(1);
-
-      if (userResult.length === 0) {
+      // 1. Check user exists (already handled by auth)
+      const userDoc = await getDoc(doc(db, "users", user.id));
+      if (!userDoc.exists()) {
         setIsLoading(false);
         return;
       }
 
-      const userId = userResult[0].id;
-
       // 2. Fetch all possible trophies
-      const trophiesResult = await db.select().from(trophies);
+      const trophiesRef = collection(db, "trophies");
+      const trophiesSnapshot = await getDocs(trophiesRef);
 
       // 3. Fetch user's earned trophies
-      const earnedResult = await db
-        .select({
-          trophyId: userTrophies.trophyId,
-          earnedAt: userTrophies.earnedAt,
-        })
-        .from(userTrophies)
-        .where(eq(userTrophies.userId, userId));
+      const userTrophiesRef = collection(db, "userTrophies");
+      const userTrophiesQuery = query(
+        userTrophiesRef,
+        where("userId", "==", user.id)
+      );
+      const earnedSnapshot = await getDocs(userTrophiesQuery);
+
+      // Build a map of earned trophy IDs with earnedAt dates
+      const earnedMap = new Map();
+      earnedSnapshot.forEach((doc) => {
+        const data = doc.data();
+        earnedMap.set(data.trophyId, data.earnedAt);
+      });
 
       // 4. Map them together
-      const mergedTrophies = trophiesResult.map((t) => {
-        const earned = earnedResult.find((e) => e.trophyId === t.id);
+      const mergedTrophies = trophiesSnapshot.docs.map((doc) => {
+        const t = doc.data();
+        const earnedAt = earnedMap.has(doc.id) ? earnedMap.get(doc.id) : null;
         return {
-          ...t,
-          earnedAt: earned ? earned.earnedAt : null,
+          id: doc.id,
+          name: t.name,
+          description: t.description,
+          icon: t.icon,
+          conditionType: t.conditionType,
+          conditionValue: t.conditionValue,
+          category: t.category,
+          earnedAt: earnedAt ? new Date(earnedAt.seconds * 1000) : null,
         };
       });
 
@@ -73,7 +86,7 @@ export const useTrophies = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [isLoaded, isSignedIn, user]);
+  }, [isSignedIn, user]);
 
   useEffect(() => {
     fetchTrophyData();
@@ -81,7 +94,7 @@ export const useTrophies = () => {
 
   return {
     trophies: allTrophies,
-    isLoading,
+    isLoading: isLoading || authLoading,
     error,
     refetch: fetchTrophyData,
   };
